@@ -1,0 +1,6 @@
+{
+  "name": "KinetiGuard - Child GPS Geofence & Wearable Monitor",
+  "description": "Real-time child GPS tracking system with intelligent geofencing alerts, interactive safe zones, wearable wristband telemetry, and location history playback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
