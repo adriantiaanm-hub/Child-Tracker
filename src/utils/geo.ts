@@ -140,3 +140,27 @@ export function calculateBearing(start: Coordinates, end: Coordinates): number {
   const bearing = (Math.atan2(y, x) * 180) / Math.PI;
   return (bearing + 360) % 360;
 }
+
+/**
+ * Converts degree bearing into 16-point cardinal compass direction
+ */
+export function getCompassDirection(bearing: number): string {
+  const directions = [
+    'N', 'NNE', 'NE', 'ENE',
+    'E', 'ESE', 'SE', 'SSE',
+    'S', 'SSW', 'SW', 'WSW',
+    'W', 'WNW', 'NW', 'NNW'
+  ];
+  const index = Math.round(((bearing % 360) / 22.5)) % 16;
+  return directions[index];
+}
+
+/**
+ * Estimates walking travel time in minutes based on 4.8 km/h (80 m/min) average walking speed
+ */
+export function calculateWalkingEtaMinutes(distanceMeters: number): number {
+  if (distanceMeters <= 0) return 0;
+  const minutes = distanceMeters / 80;
+  return Math.max(1, Math.round(minutes));
+}
+

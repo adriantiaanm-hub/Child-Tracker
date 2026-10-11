@@ -33,6 +33,28 @@ export interface WristbandTelemetry {
   lastSyncTimestamp: number;
   isRinging: boolean;
   isSosActive: boolean;
+  // Control Lock & Biometric Heart Rate Safety
+  isControlLocked: boolean; // Remote safety lockout preventing child or unauthorized tampering
+  lockMode: 'unlocked' | 'child_lock' | 'school_lock' | 'emergency_lockdown';
+  heartRateThresholdMax: number; // BPM threshold triggering alert & auto-lock
+  heartRateThresholdMin: number; // BPM lower threshold
+  autoLockOnHeartSpike: boolean; // Automatically engages lockdown when heart rate spikes
+  stressStatus: 'normal' | 'elevated' | 'critical';
+  restingHeartRate: number;
+  peakHeartRate: number;
+  heartRateHistory: { timestamp: number; bpm: number }[];
+}
+
+export interface ParentLocationState {
+  coords: Coordinates;
+  accuracyMeters: number;
+  isUsingRealGps: boolean;
+  proximityTetherEnabled: boolean;
+  proximityTetherRadiusMeters: number;
+  distanceToSelectedChild: number;
+  bearingToSelectedChild: number;
+  compassDirection: string;
+  walkingEtaMinutes: number;
 }
 
 export interface GPSBreadcrumb {

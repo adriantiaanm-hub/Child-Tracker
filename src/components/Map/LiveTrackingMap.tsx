@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
-import { ChildProfile, Coordinates, GeofenceZone, GPSBreadcrumb, ReferenceLandmark } from '../../types/tracking';
+import { ChildProfile, Coordinates, GeofenceZone, GPSBreadcrumb, ReferenceLandmark, ParentLocationState } from '../../types/tracking';
+import { formatDistance } from '../../utils/geo';
 import {
   Layers,
   Crosshair,
@@ -16,6 +17,9 @@ import {
   Sliders,
   Shield,
   Building,
+  User,
+  Compass,
+  Radio,
 } from 'lucide-react';
 
 interface LiveTrackingMapProps {
@@ -43,6 +47,11 @@ interface LiveTrackingMapProps {
   landmarks?: ReferenceLandmark[];
   onOpenReferenceMapModal?: () => void;
   scenarioName?: string;
+  // Parent Distance & Proximity additions
+  parentState?: ParentLocationState;
+  isParentClickMode?: boolean;
+  setIsParentClickMode?: (val: boolean) => void;
+  onSetParentCoords?: (coords: Coordinates) => void;
 }
 
 type MapTileTheme = 'dark' | 'voyager' | 'osm';
@@ -71,6 +80,10 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   landmarks = [],
   onOpenReferenceMapModal,
   scenarioName = 'Oakridge Campus',
+  parentState,
+  isParentClickMode = false,
+  setIsParentClickMode,
+  onSetParentCoords,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -79,6 +92,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   const geofencesLayerRef = useRef<L.LayerGroup | null>(null);
   const historyLayerRef = useRef<L.LayerGroup | null>(null);
   const landmarksLayerRef = useRef<L.LayerGroup | null>(null);
+  const proximityLayerRef = useRef<L.LayerGroup | null>(null);
   const blueprintOverlayRef = useRef<L.ImageOverlay | null>(null);
 
   const [mapTheme, setMapTheme] = useState<MapTileTheme>('dark');
@@ -101,11 +115,14 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       const geofencesGroup = L.layerGroup().addTo(map);
       const historyGroup = L.layerGroup().addTo(map);
       const landmarksGroup = L.layerGroup().addTo(map);
+      const proximityGroup = L.layerGroup().addTo(map);
       const markersGroup = L.layerGroup().addTo(map);
 
       geofencesLayerRef.current = geofencesGroup;
       historyLayerRef.current = historyGroup;
       landmarksLayerRef.current = landmarksGroup;
+      proximityLayerRef.current = proximityGroup;
+      markersGroup.addTo(map);
       markersLayerRef.current = markersGroup;
       mapRef.current = map;
 
@@ -114,6 +131,9 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
         if (isAddGeofenceMode) {
           onAddNewGeofenceAt({ lat: e.latlng.lat, lng: e.latlng.lng });
           setIsAddGeofenceMode(false);
+        } else if (isParentClickMode && onSetParentCoords) {
+          onSetParentCoords({ lat: e.latlng.lat, lng: e.latlng.lng });
+          if (setIsParentClickMode) setIsParentClickMode(false);
         } else if (clickToMoveEnabled) {
           onMoveChildManual({ lat: e.latlng.lat, lng: e.latlng.lng });
         }
@@ -126,7 +146,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
         mapRef.current = null;
       }
     };
-  }, []);
+  }, [isAddGeofenceMode, isParentClickMode]);
 
   // Update Tile Layer when Theme Changes
   useEffect(() => {
@@ -179,6 +199,120 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       blueprintOverlayRef.current = overlay;
     }
   }, [showBlueprintOverlay, overlaySvgUrl, overlayBounds, blueprintOpacity]);
+
+  // Render Parent Location, Distance Vector Line & Virtual Leash Tether
+  useEffect(() => {
+    if (!proximityLayerRef.current || !mapRef.current || !parentState) return;
+    proximityLayerRef.current.clearLayers();
+
+    const parentCoords = parentState.coords;
+    const childCoords = selectedChild.currentCoords;
+
+    const isTetherBreached =
+      parentState.proximityTetherEnabled &&
+      parentState.distanceToSelectedChild > parentState.proximityTetherRadiusMeters;
+
+    // 1. Proximity Tether Circle around Parent
+    if (parentState.proximityTetherEnabled) {
+      const tetherCircle = L.circle([parentCoords.lat, parentCoords.lng], {
+        radius: parentState.proximityTetherRadiusMeters,
+        color: isTetherBreached ? '#f43f5e' : '#6366f1',
+        weight: 2,
+        dashArray: '5, 5',
+        fillColor: isTetherBreached ? '#f43f5e' : '#6366f1',
+        fillOpacity: isTetherBreached ? 0.15 : 0.08,
+      });
+
+      tetherCircle.bindPopup(`
+        <div style="font-family: inherit; font-size: 11px;" class="p-1">
+          <div class="font-bold text-slate-900 flex items-center gap-1">
+            <span>Virtual Leash Tether (${parentState.proximityTetherRadiusMeters}m)</span>
+          </div>
+          <div class="text-slate-600 mt-1">
+            Status: ${isTetherBreached ? '⚠️ BREACHED - Child outside tether!' : '✓ Child safe within tether'}
+          </div>
+        </div>
+      `);
+      proximityLayerRef.current.addLayer(tetherCircle);
+    }
+
+    // 2. Parent Location Marker
+    const parentIcon = L.divIcon({
+      className: 'parent-marker',
+      html: `
+        <div class="relative group cursor-pointer flex flex-col items-center">
+          <div class="absolute -inset-3 rounded-full bg-indigo-500/30 animate-ping opacity-60"></div>
+          <div class="relative w-10 h-10 rounded-full border-2 border-indigo-400 bg-slate-900 flex items-center justify-center text-indigo-300 shadow-xl ring-4 ring-indigo-500/20">
+            <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+          </div>
+          <div class="mt-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-950/95 border border-indigo-500/60 text-indigo-200 shadow whitespace-nowrap">
+            You (Parent)
+          </div>
+        </div>
+      `,
+      iconSize: [40, 60],
+      iconAnchor: [20, 25],
+    });
+
+    const parentMarker = L.marker([parentCoords.lat, parentCoords.lng], {
+      icon: parentIcon,
+      zIndexOffset: 900,
+    });
+    parentMarker.bindPopup(`
+      <div style="font-family: inherit; font-size: 11px;" class="p-1">
+        <strong class="text-slate-900">Your Location (Parent Device)</strong>
+        <div class="text-slate-600 mt-0.5">
+          Distance to ${selectedChild.name}: <strong class="text-indigo-600">${formatDistance(parentState.distanceToSelectedChild)}</strong>
+        </div>
+        <div class="text-[10px] text-slate-500 font-mono mt-1">
+          Walking ETA: ~${parentState.walkingEtaMinutes} min · Bearing: ${parentState.compassDirection}
+        </div>
+      </div>
+    `);
+    proximityLayerRef.current.addLayer(parentMarker);
+
+    // 3. Distance Vector Line between Parent and Selected Child
+    const distanceVectorLine = L.polyline(
+      [
+        [parentCoords.lat, parentCoords.lng],
+        [childCoords.lat, childCoords.lng],
+      ],
+      {
+        color: isTetherBreached ? '#f43f5e' : '#6366f1',
+        weight: 2.5,
+        dashArray: '6, 6',
+        opacity: 0.85,
+      }
+    );
+    proximityLayerRef.current.addLayer(distanceVectorLine);
+
+    // 4. Midpoint Distance Label Badge
+    const midLat = (parentCoords.lat + childCoords.lat) / 2;
+    const midLng = (parentCoords.lng + childCoords.lng) / 2;
+
+    const midLabelIcon = L.divIcon({
+      className: 'distance-midpoint-pill',
+      html: `
+        <div class="px-2.5 py-1 rounded-full text-[10px] font-mono font-bold shadow-lg border backdrop-blur-md whitespace-nowrap flex items-center gap-1 ${
+          isTetherBreached
+            ? 'bg-rose-950/90 border-rose-500 text-rose-200 ring-2 ring-rose-500/40 animate-pulse'
+            : 'bg-slate-900/95 border-indigo-500/60 text-indigo-200'
+        }">
+          <span>↔ ${formatDistance(parentState.distanceToSelectedChild)}</span>
+          <span class="opacity-70 font-normal">(${parentState.walkingEtaMinutes}m walk)</span>
+        </div>
+      `,
+      iconSize: [120, 24],
+      iconAnchor: [60, 12],
+    });
+
+    const midMarker = L.marker([midLat, midLng], {
+      icon: midLabelIcon,
+      zIndexOffset: 850,
+      interactive: false,
+    });
+    proximityLayerRef.current.addLayer(midMarker);
+  }, [parentState, selectedChild]);
 
   // Render Reference Landmarks (Gates, Muster Points, Classrooms, Playgrounds)
   useEffect(() => {
@@ -334,6 +468,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       const isSelected = child.id === selectedChild.id;
       const isBreached = child.status === 'breached' || !child.isInsideSafeZone;
       const isSos = child.status === 'sos' || child.wristband.isSosActive;
+      const isLockActive = child.wristband.isControlLocked;
 
       let statusColor = 'border-emerald-500 shadow-emerald-500/40 text-emerald-400';
       let ringColor = 'ring-emerald-400/30';
@@ -369,14 +504,17 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
               class="absolute top-1/2 left-1/2 -ml-1 w-2 h-2 bg-cyan-400 border border-slate-900 rotate-45 transform"
             ></div>
 
+            <!-- Mini Wearable SOS, Lock or Status Icon Badge -->
             <div class="absolute -bottom-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold ${
               isSos
                 ? 'bg-red-600 text-white animate-bounce'
                 : isBreached
                 ? 'bg-rose-500 text-white'
+                : isLockActive
+                ? 'bg-amber-500 text-slate-950 font-black'
                 : 'bg-emerald-500 text-white'
             }">
-              ${isSos ? '!' : isBreached ? '✕' : '✓'}
+              ${isSos ? '!' : isBreached ? '✕' : isLockActive ? '🔒' : '✓'}
             </div>
           </div>
 
@@ -387,6 +525,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
           }">
             <span>${child.name}</span>
             <span class="opacity-60 font-mono text-[10px] ml-1">· ${child.speedKmh.toFixed(1)} km/h</span>
+            <span class="text-rose-400 font-mono text-[10px] ml-1">♥${child.wristband.heartRate}</span>
           </div>
         </div>
       `;
@@ -425,20 +564,26 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
               </strong>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Zone:</span>
-              <span>${child.currentZoneName || 'Unassigned / Open'}</span>
+              <span class="text-slate-500">Distance to Parent:</span>
+              <strong class="text-indigo-600 font-semibold font-mono">
+                ${parentState ? formatDistance(parentState.distanceToSelectedChild) : '--'}
+              </strong>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Speed / Heading:</span>
-              <span>${child.speedKmh.toFixed(1)} km/h · ${Math.round(child.heading)}°</span>
+              <span class="text-slate-500">Heart Rate:</span>
+              <span class="font-mono font-bold ${child.wristband.heartRate >= child.wristband.heartRateThresholdMax ? 'text-rose-600' : 'text-slate-800'}">
+                ♥ ${child.wristband.heartRate} BPM (${child.wristband.stressStatus})
+              </span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Wristband Battery:</span>
-              <span class="font-medium">${child.wristband.batteryLevel}% · Heart: ${child.wristband.heartRate} bpm</span>
+              <span class="text-slate-500">Control Lockout:</span>
+              <span class="font-medium ${child.wristband.isControlLocked ? 'text-amber-600 font-bold' : 'text-slate-500'}">
+                ${child.wristband.isControlLocked ? `🔒 Active (${child.wristband.lockMode})` : 'Unlocked'}
+              </span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">Skin Contact:</span>
-              <span>${child.wristband.isWorn ? '✓ Worn on wrist' : '⚠️ Clasp Removed!'}</span>
+              <span class="text-slate-500">Battery:</span>
+              <span class="font-medium">${child.wristband.batteryLevel}% · ${child.wristband.isWorn ? 'Worn on wrist' : '⚠️ Tampered'}</span>
             </div>
           </div>
 
@@ -462,13 +607,24 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
 
       markersLayerRef.current?.addLayer(marker);
     });
-  }, [allChildren, selectedChild]);
+  }, [allChildren, selectedChild, parentState]);
 
   // Recenter map on selected child coordinate change
   const centerOnSelectedChild = () => {
     if (mapRef.current) {
       mapRef.current.flyTo(
         [selectedChild.currentCoords.lat, selectedChild.currentCoords.lng],
+        17,
+        { duration: 0.8 }
+      );
+    }
+  };
+
+  // Center on Parent
+  const centerOnParent = () => {
+    if (mapRef.current && parentState) {
+      mapRef.current.flyTo(
+        [parentState.coords.lat, parentState.coords.lng],
         17,
         { duration: 0.8 }
       );
@@ -507,9 +663,27 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
               <span>{selectedChild.currentZoneName || 'Outside Boundaries'}</span>
               <span>·</span>
               <span className="font-mono text-cyan-300">{selectedChild.speedKmh.toFixed(1)} km/h</span>
+              <span>·</span>
+              <span className="text-rose-400 font-mono font-medium">♥{selectedChild.wristband.heartRate} BPM</span>
             </div>
           </div>
         </div>
+
+        {/* Live Distance Meter Pill to Parent */}
+        {parentState && (
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-indigo-950/90 backdrop-blur-md border border-indigo-500/50 shadow-xl text-xs text-indigo-200">
+            <Compass className="w-4 h-4 text-indigo-400 shrink-0" />
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400">Distance from You:</span>
+              <strong className="font-mono text-slate-100 font-bold">
+                {formatDistance(parentState.distanceToSelectedChild)}
+              </strong>
+              <span className="text-[10px] text-indigo-300 font-mono">
+                (~{parentState.walkingEtaMinutes}m walk · {parentState.compassDirection})
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Action toolbar */}
         <div className="flex items-center gap-1 p-1 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-lg">
@@ -520,6 +694,16 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
           >
             <Crosshair className="w-4 h-4" />
           </button>
+
+          {parentState && (
+            <button
+              onClick={centerOnParent}
+              title="Center on You (Parent)"
+              className="p-2 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-indigo-400 transition"
+            >
+              <User className="w-4 h-4" />
+            </button>
+          )}
 
           <button
             onClick={onToggleHistoryTrail}
@@ -578,7 +762,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
             className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/90 hover:bg-slate-850 border border-cyan-500/40 backdrop-blur-md shadow-xl text-xs font-semibold text-cyan-200 hover:border-cyan-400 transition"
           >
             <MapIcon className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Reference Map: {scenarioName}</span>
+            <span>Reference: {scenarioName}</span>
             <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono">
               Blueprint ON
             </span>
@@ -586,7 +770,20 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
         )}
       </div>
 
-      {/* Map Mode Status Banner (if Add Geofence active) */}
+      {/* Map Mode Status Banner (Parent Click or Add Geofence) */}
+      {isParentClickMode && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-10 px-4 py-2 bg-indigo-950/90 border border-indigo-500/70 rounded-full shadow-2xl backdrop-blur-md flex items-center gap-2 text-xs text-indigo-200 animate-pulse">
+          <User className="w-4 h-4 text-indigo-400" />
+          <span>Click anywhere on the map to set your parent location</span>
+          <button
+            onClick={() => setIsParentClickMode && setIsParentClickMode(false)}
+            className="ml-2 underline text-indigo-300 hover:text-white"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
       {isAddGeofenceMode && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 z-10 px-4 py-2 bg-emerald-950/90 border border-emerald-500/50 rounded-full shadow-2xl backdrop-blur-md flex items-center gap-2 text-xs text-emerald-200 animate-pulse">
           <MapPin className="w-4 h-4 text-emerald-400" />
@@ -648,7 +845,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none opacity-80 hover:opacity-100 transition">
         <div className="px-3.5 py-1.5 bg-slate-950/80 backdrop-blur-md border border-slate-800 rounded-full text-[11px] text-slate-400 shadow-lg flex items-center gap-2">
           <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
-          <span>Tip: Click map to relocate child GPS · Blueprint site plan aligned</span>
+          <span>Tip: Click map to relocate · Distance vector shows real-time separation</span>
           {showHistoryTrail && (
             <span className="text-cyan-400 font-mono">· {historyPoints.length} breadcrumbs</span>
           )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   ChildProfile,
   Coordinates,
@@ -6,6 +6,8 @@ import {
   GPSBreadcrumb,
   AlertNotification,
   SampleScenario,
+  ParentLocationState,
+  WristbandTelemetry,
 } from './types/tracking';
 import {
   INITIAL_CHILDREN,
@@ -17,12 +19,17 @@ import {
   evaluateGeofences,
   getDistanceMeters,
   calculateBearing,
+  getCompassDirection,
+  calculateWalkingEtaMinutes,
+  formatDistance,
 } from './utils/geo';
 import { soundManager } from './utils/audio';
 
 import { Header } from './components/Dashboard/Header';
 import { ChildSelector } from './components/Dashboard/ChildSelector';
 import { WearableCard } from './components/Dashboard/WearableCard';
+import { ParentProximityCard } from './components/Dashboard/ParentProximityCard';
+import { HeartRateControlLockCard } from './components/Dashboard/HeartRateControlLockCard';
 import { GeofenceManager } from './components/Dashboard/GeofenceManager';
 import { HistoryPlayback } from './components/Dashboard/HistoryPlayback';
 import { AlertsDrawer } from './components/Dashboard/AlertsDrawer';
@@ -41,6 +48,9 @@ import {
   PhoneCall,
   BellRing,
   ExternalLink,
+  Compass,
+  Heart,
+  Lock,
 } from 'lucide-react';
 
 export default function App() {
@@ -57,6 +67,16 @@ export default function App() {
   const [geofences, setGeofences] = useState<GeofenceZone[]>(SAMPLE_MAP_SCENARIOS[0].geofences);
   const [alerts, setAlerts] = useState<AlertNotification[]>([]);
   const [showHistoryTrail, setShowHistoryTrail] = useState<boolean>(true);
+
+  // Parent Location & Proximity Tether State
+  const [parentCoords, setParentCoords] = useState<Coordinates>({ lat: 37.4442, lng: -122.1505 });
+  const [isUsingRealGps, setIsUsingRealGps] = useState<boolean>(false);
+  const [isParentClickMode, setIsParentClickMode] = useState<boolean>(false);
+  const [proximityTetherEnabled, setProximityTetherEnabled] = useState<boolean>(false);
+  const [proximityTetherRadiusMeters, setProximityTetherRadiusMeters] = useState<number>(80);
+
+  // Right sidebar active tab navigation (All-in-one vs category)
+  const [activeTab, setActiveTab] = useState<'overview' | 'proximity' | 'cardiac_lock'>('overview');
 
   // Modals & Drawers State
   const [isAlertsDrawerOpen, setIsAlertsDrawerOpen] = useState(false);
@@ -79,6 +99,34 @@ export default function App() {
   const selectedChild =
     childrenList.find((c) => c.id === selectedChildId) || childrenList[0];
 
+  // Calculate live distance & proximity metrics from Parent to Selected Child
+  const parentState: ParentLocationState = useMemo(() => {
+    const childCoords = temporaryScrubbedCoords || selectedChild.currentCoords;
+    const distanceToSelectedChild = getDistanceMeters(parentCoords, childCoords);
+    const bearingToSelectedChild = calculateBearing(parentCoords, childCoords);
+    const compassDirection = getCompassDirection(bearingToSelectedChild);
+    const walkingEtaMinutes = calculateWalkingEtaMinutes(distanceToSelectedChild);
+
+    return {
+      coords: parentCoords,
+      accuracyMeters: isUsingRealGps ? 4.8 : 3.5,
+      isUsingRealGps,
+      proximityTetherEnabled,
+      proximityTetherRadiusMeters,
+      distanceToSelectedChild,
+      bearingToSelectedChild,
+      compassDirection,
+      walkingEtaMinutes,
+    };
+  }, [
+    parentCoords,
+    selectedChild.currentCoords,
+    temporaryScrubbedCoords,
+    isUsingRealGps,
+    proximityTetherEnabled,
+    proximityTetherRadiusMeters,
+  ]);
+
   // Helper to push alerts
   const pushAlert = useCallback(
     (newAlert: Omit<AlertNotification, 'id' | 'timestamp' | 'read'>) => {
@@ -93,6 +141,30 @@ export default function App() {
     []
   );
 
+  // Check proximity tether breach
+  useEffect(() => {
+    if (
+      proximityTetherEnabled &&
+      parentState.distanceToSelectedChild > proximityTetherRadiusMeters
+    ) {
+      soundManager.playBreachAlarm();
+      pushAlert({
+        childId: selectedChild.id,
+        type: 'geofence_breach',
+        severity: 'critical',
+        title: `VIRTUAL LEASH EXCEEDED: ${selectedChild.name}!`,
+        message: `${selectedChild.name} is ${Math.round(parentState.distanceToSelectedChild)}m away (Tether max: ${proximityTetherRadiusMeters}m). Immediate proximity alert!`,
+        coords: selectedChild.currentCoords,
+        zoneName: 'Virtual Leash Boundary',
+      });
+    }
+  }, [
+    proximityTetherEnabled,
+    proximityTetherRadiusMeters,
+    parentState.distanceToSelectedChild,
+    selectedChild.id,
+  ]);
+
   // Switch Sample Reference Scenario
   const handleSelectScenario = (scenario: SampleScenario) => {
     if (wanderIntervalRef.current) clearInterval(wanderIntervalRef.current);
@@ -105,6 +177,12 @@ export default function App() {
     setCustomOverlayUrl(null);
     setIsLiveScrubbing(false);
     setTemporaryScrubbedCoords(null);
+
+    // Place parent 70 meters south of the scenario center
+    setParentCoords({
+      lat: scenario.center.lat - 0.0006,
+      lng: scenario.center.lng + 0.0004,
+    });
 
     soundManager.playSafeChime();
     pushAlert({
@@ -126,6 +204,220 @@ export default function App() {
       severity: 'info',
       title: 'Custom Blueprint Overlay Aligned',
       message: 'Custom site plan map has been projected onto GPS coordinates.',
+    });
+  };
+
+  // Acquire real device GPS
+  const handleAcquireRealGps = () => {
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setParentCoords({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+          });
+          setIsUsingRealGps(true);
+          soundManager.playSafeChime();
+          pushAlert({
+            childId: selectedChildId,
+            type: 'info' as any,
+            severity: 'info',
+            title: 'Live Device GPS Acquired',
+            message: `Parent location calibrated to real GPS fix (accuracy: ±${Math.round(pos.coords.accuracy)}m).`,
+          });
+        },
+        (err) => {
+          // Fallback simulation
+          setIsUsingRealGps(false);
+          pushAlert({
+            childId: selectedChildId,
+            type: 'info' as any,
+            severity: 'warning',
+            title: 'GPS Sensor Simulation',
+            message: 'Device GPS permission unavailable; using precision simulator mode.',
+          });
+        },
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    }
+  };
+
+  // Teleport parent 40m from child for testing
+  const handleRelocateParentNearChild = () => {
+    setParentCoords({
+      lat: selectedChild.currentCoords.lat - 0.0003,
+      lng: selectedChild.currentCoords.lng + 0.0002,
+    });
+    soundManager.playSafeChime();
+  };
+
+  // Toggle Control Lock
+  const handleToggleControlLock = (childId: string, locked: boolean) => {
+    setChildrenList((prev) =>
+      prev.map((c) => {
+        if (c.id !== childId) return c;
+        const newLockMode: WristbandTelemetry['lockMode'] = locked
+          ? (c.wristband.lockMode === 'unlocked' ? 'child_lock' : c.wristband.lockMode)
+          : 'unlocked';
+        const newWristband: WristbandTelemetry = {
+          ...c.wristband,
+          isControlLocked: locked,
+          lockMode: newLockMode,
+        };
+        return { ...c, wristband: newWristband };
+      })
+    );
+
+    if (locked) {
+      soundManager.playSafeChime();
+      pushAlert({
+        childId,
+        type: 'info' as any,
+        severity: 'info',
+        title: `Control Lock Activated: ${selectedChild.name}'s Wristband`,
+        message: 'Settings menu, power-off button, and Bluetooth disconnect locked to protect child.',
+      });
+    } else {
+      soundManager.playWristbandBeep();
+      pushAlert({
+        childId,
+        type: 'info' as any,
+        severity: 'info',
+        title: `Control Lock Released: ${selectedChild.name}'s Wristband`,
+        message: 'Device settings menu unlocked by parent authority.',
+      });
+    }
+  };
+
+  // Change Lock Mode
+  const handleChangeLockMode = (childId: string, mode: WristbandTelemetry['lockMode']) => {
+    setChildrenList((prev) =>
+      prev.map((c) => {
+        if (c.id !== childId) return c;
+        return {
+          ...c,
+          wristband: {
+            ...c.wristband,
+            lockMode: mode,
+            isControlLocked: mode !== 'unlocked',
+          },
+        };
+      })
+    );
+
+    soundManager.playWristbandBeep();
+    pushAlert({
+      childId,
+      type: 'info' as any,
+      severity: 'info',
+      title: `Lock Mode Updated: ${mode.toUpperCase()}`,
+      message: `Configured wristband lock policy for ${selectedChild.name}.`,
+    });
+  };
+
+  // Update Max Heart Threshold
+  const handleUpdateHeartThreshold = (childId: string, maxBpm: number) => {
+    setChildrenList((prev) =>
+      prev.map((c) => {
+        if (c.id !== childId) return c;
+        return {
+          ...c,
+          wristband: {
+            ...c.wristband,
+            heartRateThresholdMax: maxBpm,
+          },
+        };
+      })
+    );
+  };
+
+  // Toggle Auto-Lock on Heart Spike
+  const handleToggleAutoLock = (childId: string, enabled: boolean) => {
+    setChildrenList((prev) =>
+      prev.map((c) => {
+        if (c.id !== childId) return c;
+        return {
+          ...c,
+          wristband: {
+            ...c.wristband,
+            autoLockOnHeartSpike: enabled,
+          },
+        };
+      })
+    );
+  };
+
+  // Simulate Sudden Heart Rate Spike
+  const handleSimulateHeartSpike = (childId: string) => {
+    const spikeBpm = 142;
+    soundManager.playBreachAlarm();
+
+    setChildrenList((prev) =>
+      prev.map((c) => {
+        if (c.id !== childId) return c;
+        const autoLockEngaged = c.wristband.autoLockOnHeartSpike;
+
+        const updatedHistory = [
+          ...(c.wristband.heartRateHistory || []),
+          { timestamp: Date.now(), bpm: spikeBpm },
+        ];
+
+        return {
+          ...c,
+          wristband: {
+            ...c.wristband,
+            heartRate: spikeBpm,
+            peakHeartRate: Math.max(c.wristband.peakHeartRate, spikeBpm),
+            stressStatus: 'critical',
+            isControlLocked: autoLockEngaged ? true : c.wristband.isControlLocked,
+            lockMode: autoLockEngaged ? 'emergency_lockdown' : c.wristband.lockMode,
+            heartRateHistory: updatedHistory,
+          },
+        };
+      })
+    );
+
+    pushAlert({
+      childId,
+      type: 'high_heart_rate',
+      severity: 'critical',
+      title: `🚨 CARDIAC DISTRESS ALERT: ${selectedChild.name} (142 BPM)!`,
+      message: `Heart rate spiked past safety threshold (${selectedChild.wristband.heartRateThresholdMax} BPM). Device auto-locked into Emergency Lockdown with screen beacon active!`,
+      coords: selectedChild.currentCoords,
+      zoneName: selectedChild.currentZoneName,
+    });
+  };
+
+  // Normalize Heart Rate
+  const handleResetHeartRate = (childId: string) => {
+    const normalBpm = 82;
+    soundManager.playSafeChime();
+
+    setChildrenList((prev) =>
+      prev.map((c) => {
+        if (c.id !== childId) return c;
+        const updatedHistory = [
+          ...(c.wristband.heartRateHistory || []),
+          { timestamp: Date.now(), bpm: normalBpm },
+        ];
+        return {
+          ...c,
+          wristband: {
+            ...c.wristband,
+            heartRate: normalBpm,
+            stressStatus: 'normal',
+            heartRateHistory: updatedHistory,
+          },
+        };
+      })
+    );
+
+    pushAlert({
+      childId,
+      type: 'info' as any,
+      severity: 'info',
+      title: 'Heart Rate Normalized',
+      message: `${selectedChild.name}'s cardiac telemetry returned to resting rate (82 BPM).`,
     });
   };
 
@@ -236,17 +528,33 @@ export default function App() {
   useEffect(() => {
     const pulseInterval = setInterval(() => {
       setChildrenList((prev) =>
-        prev.map((c) => ({
-          ...c,
-          wristband: {
-            ...c.wristband,
-            heartRate: Math.max(70, Math.min(130, c.wristband.heartRate + (Math.floor(Math.random() * 5) - 2))),
-            stepCount: c.wristband.stepCount + (c.speedKmh > 1 ? 4 : 0),
-            lastSyncTimestamp: Date.now(),
-          },
-        }))
+        prev.map((c) => {
+          // If in critical spike, decay gradually down
+          let nextHeart = c.wristband.heartRate;
+          if (c.wristband.heartRate > 120) {
+            nextHeart = Math.max(88, c.wristband.heartRate - 4);
+          } else {
+            nextHeart = Math.max(70, Math.min(115, c.wristband.heartRate + (Math.floor(Math.random() * 5) - 2)));
+          }
+
+          const history = [
+            ...(c.wristband.heartRateHistory || []).slice(-15),
+            { timestamp: Date.now(), bpm: nextHeart },
+          ];
+
+          return {
+            ...c,
+            wristband: {
+              ...c.wristband,
+              heartRate: nextHeart,
+              heartRateHistory: history,
+              stepCount: c.wristband.stepCount + (c.speedKmh > 1 ? 4 : 0),
+              lastSyncTimestamp: Date.now(),
+            },
+          };
+        })
       );
-    }, 4000);
+    }, 4500);
 
     return () => clearInterval(pulseInterval);
   }, []);
@@ -472,6 +780,7 @@ export default function App() {
     setAlerts([]);
     setIsLiveScrubbing(false);
     setTemporaryScrubbedCoords(null);
+    setParentCoords({ lat: 37.4442, lng: -122.1505 });
     soundManager.playSafeChime();
   };
 
@@ -532,6 +841,10 @@ export default function App() {
             landmarks={activeScenario.landmarks}
             onOpenReferenceMapModal={() => setIsReferenceModalOpen(true)}
             scenarioName={activeScenario.name}
+            parentState={parentState}
+            isParentClickMode={isParentClickMode}
+            setIsParentClickMode={setIsParentClickMode}
+            onSetParentCoords={(coords) => setParentCoords(coords)}
           />
 
           {/* Quick Floating Emergency Breach Alert Bar on Map */}
@@ -546,7 +859,7 @@ export default function App() {
                     Geofence Alert: {selectedChild.name} is Outside Perimeter!
                   </div>
                   <div className="text-[11px] text-rose-300/80">
-                    Speed: {selectedChild.speedKmh.toFixed(1)} km/h · Wearable GPS active
+                    Distance from you: {formatDistance(parentState.distanceToSelectedChild)} ({parentState.compassDirection}) · Speed: {selectedChild.speedKmh.toFixed(1)} km/h
                   </div>
                 </div>
               </div>
@@ -572,8 +885,8 @@ export default function App() {
           )}
         </section>
 
-        {/* Right Side: Parent Telemetry, Geofences, Wristband & History Playback */}
-        <aside className="w-full lg:w-[460px] xl:w-[500px] flex flex-col bg-slate-950 overflow-y-auto p-4 gap-4 no-scrollbar">
+        {/* Right Side: Parent Telemetry, Proximity, Cardiac Lock, Geofences & History Playback */}
+        <aside className="w-full lg:w-[480px] xl:w-[520px] flex flex-col bg-slate-950 overflow-y-auto p-4 gap-4 no-scrollbar">
           {/* Child Selector Carousel */}
           <div>
             <div className="flex items-center justify-between mb-2">
@@ -593,6 +906,69 @@ export default function App() {
             />
           </div>
 
+          {/* Quick Feature Filter Pill Nav */}
+          <div className="flex bg-slate-900/90 border border-slate-800 rounded-xl p-1 text-xs">
+            <button
+              onClick={() => setActiveTab('overview')}
+              className={`flex-1 py-1.5 rounded-lg font-semibold transition ${
+                activeTab === 'overview'
+                  ? 'bg-slate-800 text-cyan-300 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              All Controls
+            </button>
+            <button
+              onClick={() => setActiveTab('proximity')}
+              className={`flex-1 py-1.5 rounded-lg font-semibold transition flex items-center justify-center gap-1.5 ${
+                activeTab === 'proximity'
+                  ? 'bg-indigo-950 border border-indigo-600/50 text-indigo-300 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Compass className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Distance & Tether</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('cardiac_lock')}
+              className={`flex-1 py-1.5 rounded-lg font-semibold transition flex items-center justify-center gap-1.5 ${
+                activeTab === 'cardiac_lock'
+                  ? 'bg-rose-950 border border-rose-600/50 text-rose-300 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Heart className="w-3.5 h-3.5 text-rose-400" />
+              <span>Heart & Lock</span>
+            </button>
+          </div>
+
+          {/* Feature 1: Parent-to-Child Distance & Proximity Tether Card */}
+          {(activeTab === 'overview' || activeTab === 'proximity') && (
+            <ParentProximityCard
+              child={selectedChild}
+              parentState={parentState}
+              onToggleTether={setProximityTetherEnabled}
+              onChangeTetherRadius={setProximityTetherRadiusMeters}
+              onAcquireRealGps={handleAcquireRealGps}
+              onSetParentClickMode={setIsParentClickMode}
+              isParentClickMode={isParentClickMode}
+              onRelocateParentNearChild={handleRelocateParentNearChild}
+            />
+          )}
+
+          {/* Feature 2: Heart Rate Continuous Monitoring & Device Control Lock Card */}
+          {(activeTab === 'overview' || activeTab === 'cardiac_lock') && (
+            <HeartRateControlLockCard
+              child={selectedChild}
+              onToggleControlLock={handleToggleControlLock}
+              onChangeLockMode={handleChangeLockMode}
+              onUpdateHeartThreshold={handleUpdateHeartThreshold}
+              onToggleAutoLock={handleToggleAutoLock}
+              onSimulateHeartSpike={handleSimulateHeartSpike}
+              onResetHeartRate={handleResetHeartRate}
+            />
+          )}
+
           {/* Wearable Hardware Telemetry Card */}
           <WearableCard
             child={selectedChild}
@@ -600,6 +976,7 @@ export default function App() {
             onOpenIntercom={(child) => setIntercomChild(child)}
             onSimulateTamper={handleToggleClasp}
             onSimulateSos={handleToggleSos}
+            onToggleControlLock={handleToggleControlLock}
           />
 
           {/* GPS Location History & Journey Playback */}
@@ -643,6 +1020,8 @@ export default function App() {
         onTriggerSos={handleToggleSos}
         onToggleClasp={handleToggleClasp}
         onSimulateWander={handleStartWanderSimulation}
+        onToggleControlLock={handleToggleControlLock}
+        onSimulateHeartSpike={handleSimulateHeartSpike}
       />
 
       {/* Two-Way Voice Intercom Call Modal */}

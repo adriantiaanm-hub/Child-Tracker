@@ -22,6 +22,7 @@ interface WearableCardProps {
   onOpenIntercom: (child: ChildProfile) => void;
   onSimulateTamper: (childId: string) => void;
   onSimulateSos: (childId: string) => void;
+  onToggleControlLock?: (childId: string, locked: boolean) => void;
 }
 
 export const WearableCard: React.FC<WearableCardProps> = ({
@@ -30,6 +31,7 @@ export const WearableCard: React.FC<WearableCardProps> = ({
   onOpenIntercom,
   onSimulateTamper,
   onSimulateSos,
+  onToggleControlLock,
 }) => {
   const { wristband } = child;
   const [isPinging, setIsPinging] = useState(false);
@@ -58,15 +60,31 @@ export const WearableCard: React.FC<WearableCardProps> = ({
           </div>
         </div>
 
-        {/* Live sync pill */}
-        <button
-          onClick={handlePing}
-          title="Manual GPS & Telemetry Sync"
-          className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60 transition"
-        >
-          <RotateCw className={`w-3 h-3 text-cyan-400 ${isPinging ? 'animate-spin' : ''}`} />
-          <span>Synced</span>
-        </button>
+        {/* Header Right Actions: Lock status & live sync pill */}
+        <div className="flex items-center gap-1.5">
+          {onToggleControlLock && (
+            <button
+              onClick={() => onToggleControlLock(child.id, !wristband.isControlLocked)}
+              className={`flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded border transition ${
+                wristband.isControlLocked
+                  ? 'bg-amber-950/80 border-amber-600/70 text-amber-300'
+                  : 'bg-slate-800 hover:bg-slate-750 border-slate-750 text-slate-400'
+              }`}
+              title="Remote Control Lock status"
+            >
+              <span>{wristband.isControlLocked ? '🔒 Locked' : '🔓 Unlocked'}</span>
+            </button>
+          )}
+
+          <button
+            onClick={handlePing}
+            title="Manual GPS & Telemetry Sync"
+            className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700/60 transition"
+          >
+            <RotateCw className={`w-3 h-3 text-cyan-400 ${isPinging ? 'animate-spin' : ''}`} />
+            <span>Synced</span>
+          </button>
+        </div>
       </div>
 
       {/* Primary Telemetry Grid */}
